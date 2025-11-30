@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
 from hmmlearn.hmm import GaussianHMM
 from matplotlib import pyplot as plt
-
+import sys
 
 # ============================================
 # PARAMETERS
@@ -110,6 +111,94 @@ def hmm_cluster(features_concat, k=K):
 
     return regimes, ranges
 
+def kmeans_cluster(features_concat, k, min_len=100):
+    """
+    features_concat : DataFrame (T_clean × D)
+        Rolling-window features with time index.
+    k : int
+        Number of clusters (regimes).
+    min_len : int
+        Minimum allowed length for any contiguous regime segment.
+
+    Returns
+    -------
+    regimes_smoothed : pd.Series
+        Smoothed regime labels of length T_clean.
+    regime_ranges : list of (regime_id, start_idx, end_idx)
+        Final contiguous ranges after smoothing.
+    """
+
+    # 1. Standardize features
+    scaler = StandardScaler()
+    X = scaler.fit_transform(features_concat)
+
+    # 2. K-means clustering
+    km = KMeans(n_clusters=k, random_state=42)
+    labels = km.fit_predict(X)
+
+    labels = np.array(labels)
+    n = len(labels)
+
+    # 3. Enforce minimum regime length
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and labels[j] == labels[i]:
+            j += 1
+        seg_len = j - i
+
+        if seg_len < min_len:
+            # Replace this short segment with the "closest" neighbor
+            if i == 0:
+                # Only future neighbor exists
+                labels[i:j] = labels[j]
+            elif j == n:
+                # Only previous neighbor exists
+                labels[i:j] = labels[i-1]
+            else:
+                # Choose the neighbor whose cluster center is closer
+                prev_label = labels[i-1]
+                next_label = labels[j]
+                # (you can also just default to previous)
+                labels[i:j] = prev_label  
+
+        i = j
+
+    regimes_smoothed = pd.Series(labels, index=features_concat.index, name="Regime")
+
+    # 4. Build final contiguous regime ranges
+    ranges = []
+    current = regimes_smoothed.iloc[0]
+    start_idx = regimes_smoothed.index[0]
+
+    for t in range(1, len(regimes_smoothed)):
+        if regimes_smoothed.iloc[t] != current:
+            end_idx = regimes_smoothed.index[t-1]
+            ranges.append((current, start_idx, end_idx))
+            current = regimes_smoothed.iloc[t]
+            start_idx = regimes_smoothed.index[t]
+
+    # last segment
+    ranges.append((current, start_idx, regimes_smoothed.index[-1]))
+
+    return regimes_smoothed, ranges
+
+def log_returns(prices):
+    '''
+    prices: a T x N datafram with index as dates and columns as tickers
+    '''
+    # Ensure we operate on a pandas DataFrame so we can use shift()
+    if not isinstance(prices, pd.DataFrame):
+        prices = pd.DataFrame(prices)
+
+    # Coerce columns to numeric where possible (non-numeric -> NaN)
+    prices = prices.apply(pd.to_numeric, errors='coerce')
+
+    # Log returns: log(p_t) - log(p_{t-1}) == np.log(prices).diff()
+    # This preserves the DataFrame index and columns and returns floats.
+    log_rets = np.log(prices).diff()
+
+    return log_rets
 
 
 # ============================================
@@ -120,17 +209,25 @@ if __name__ == "__main__":
 
     # 1. Load data
     prices = pd.read_csv("sp500_20yr_clean.csv")
+
     dates = prices["Timestamp"]
     prices = prices.iloc[:, 2:]    # drop index + timestamp
 
     # Ensure date index on prices
     prices.index = dates
+    print(prices.head())
 
-    # 2. Extract features
+    # 2. Compute log returns
+    features_log_ret = log_returns(prices)
+    
+    # 3. Extract features
     features_concat = compute_features(prices, window=WINDOW_SIZE)
 
-    # 3. Cluster regimes using HMM
-    regimes, ranges = hmm_cluster(features_concat, k=K)
+    # 4. Cluster regimes using HMM or KMEANS
+    regimes, ranges = kmeans_cluster(features_concat, k=K)
+    #regimes, ranges = hmm_cluster(features_concat, k=K)
+    
+
 
     # ============================================
     # OUTPUT SUMMARY
@@ -138,12 +235,12 @@ if __name__ == "__main__":
 
     print("\n=== HMM Regime Segmentation Summary ===")
     for regime_id, start, end in ranges:
-        count = regimes.loc[start:end].shape[0]
-        print(f"Regime {regime_id}: {start} → {end}  ({count} points)")
+       count = regimes.loc[start:end].shape[0]
+       print(f"Regime {regime_id}: {start} → {end}  ({count} points)")
 
     # Optionally save regimes
-    regimes.to_csv("regimes_output.csv")
-    print("\nSaved regime labels to regimes_output.csv")
+    # regimes.to_csv("regimes_output.csv")
+    # print("\nSaved regime labels to regimes_output.csv")
 
 
 
@@ -160,7 +257,7 @@ if __name__ == "__main__":
     timestamps = features_concat.index   # aligns with regimes
     price_subset = prices.loc[timestamps, sampled_tickers]
 
-    plt.figure(figsize=(18, 9))
+    plt.figure(figsize=(10, 6))
 
     # ----- Plot sampled asset prices -----
     for t in sampled_tickers:
