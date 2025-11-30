@@ -4,7 +4,7 @@ import yfinance as yf
 import time
 
 MIN_YEARS_HISTORY = 20
-SAVE_PATH = f"sp500_{MIN_YEARS_HISTORY}yr_close.csv"
+SAVE_PATH = f"sp500_{MIN_YEARS_HISTORY}yr_raw.csv"
 
 end_date = dt.date.today()
 start_date = end_date - dt.timedelta(days=MIN_YEARS_HISTORY * 365)
