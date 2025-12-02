@@ -1,100 +1,30 @@
+import sys
 import pandas as pd
 import numpy as np
+import cvxpy as cp
+import pandas_ta as ta
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from hmmlearn.hmm import GaussianHMM
-from matplotlib import pyplot as plt
 from sklearn.decomposition import PCA
-import sys
-import pandas_ta as ta
+from matplotlib import pyplot as plt
 import matplotlib.dates as mdates
 
 # ============================================
 # PARAMETERS
 # ============================================
 
-ALGORITHM = "Kmeans" #"HMM" or "Kmeans"
+ALGORITHM = "Kmeans" # "Kmeans" or "HMM" or "Optimization"
 ZIG_THRESH = 0.08
-WINDOW_SIZE = 120        # rolling window for features
+WINDOW_SIZE = 30        # rolling window for features
 K = 5                 # number of regimes
+###### LAM = 20 when opt_input = logrets(SPX), LAM = 0.393 when opt_input = SPX
+LAM = 0.393              #for optimization regime segmentation only
 MIN_LEN = 25            # minimum allowed contiguous regime length
 
 
 # ============================================
-# FEATURE ENGINEERING
-# ============================================
-
-def compute_features_new(prices, window=60):
-    """
-    prices : DataFrame (T × N)
-        Clean close prices for N assets.
-
-    Returns
-    -------
-    features : DataFrame (T × 5)
-        Market-level rolling features:
-        1. Market log return (mean across assets)
-        2. Market rolling volatility
-        3. Cross-sectional average volatility across assets
-        4. Cross-sectional dispersion (std across assets)
-        5. Market trend slope (60-day regression slope)
-    """
-
-    # ---------- Basic returns ----------
-    log_prices = np.log(prices)
-    log_returns = log_prices.diff()
-
-    # ---------- 1. Market log return (cross-sectional mean) ----------
-    market_ret = log_returns.mean(axis=1)
-
-    # ---------- 2. Market rolling volatility ----------
-    market_vol = market_ret.rolling(window).std()
-
-    # ---------- 3. Cross-sectional average volatility ----------
-    # Compute each asset's rolling vol, then average across assets
-    indiv_vol = log_returns.rolling(window).std()
-    cross_vol = indiv_vol.mean(axis=1)
-
-    # ---------- 4. Cross-sectional dispersion (std across assets) ----------
-    if prices.shape[1] == 1:
-        cross_disp = pd.Series(0.0, index=log_returns.index)
-    else:
-        cross_disp = log_returns.std(axis=1)
-
-    # ---------- 5. Market trend slope (60d linear regression slope) ----------
-    def rolling_slope(series, window):
-        """Rolling regression slope of price vs time."""
-        slopes = []
-        x = np.arange(window)
-        for i in range(len(series)):
-            if i < window:
-                slopes.append(np.nan)
-                continue
-            y = series.iloc[i-window:i].values
-            # simple linear regression slope (no intercept)
-            slope = np.polyfit(x, y, 1)[0]
-            slopes.append(slope)
-        return pd.Series(slopes, index=series.index)
-
-    market_trend = rolling_slope(log_prices.mean(axis=1), window)
-
-    # ---------- Combine into feature matrix ----------
-    features = pd.DataFrame({
-        "market_ret": market_ret,
-        "market_vol": market_vol,
-        "cross_vol": cross_vol,
-        "cross_disp": cross_disp,
-        "market_trend": market_trend
-    })
-
-    # Clean NaN rows from initial window
-    features = features.iloc[window:]
-
-    return features
-
-
-# ============================================
-# HMM-BASED REGIME CLUSTERING
+# Segmentation Methods
 # ============================================
 
 def hmm_cluster(features_concat, k=K):
@@ -238,6 +168,83 @@ def kmeans_cluster(features_concat, k, min_len=100):
 
     return regimes_smoothed, ranges
 
+def convex_regime_segmentation(prices, lam=0.5, tol=1e-5):
+    """
+    Solve convex segmentation on log-returns and output regime labels.
+
+    Args:
+        df  : pandas DataFrame with index = dates, column = "Close"
+        lam : float, lambda for total variation penalty
+        tol : float, tolerance for detecting regime changes
+
+    Returns:
+        result_df : DataFrame with index = dates, column = "Regime"
+    """
+
+
+
+    # ----- 2. Use log returns as features for segmentation -----
+    prices = prices["High"]
+    log_ret = np.log(prices).diff().dropna()
+
+    x = log_ret.values         # feature vector
+    T = len(x)
+
+    # ----- 3. CVXPY variables -----
+    mu = cp.Variable(T)
+
+    # Objective: sum (x_t - mu_t)^2
+    data_fit = cp.sum_squares(x - mu)
+
+    # TV penalty: sum |mu_t - mu_{t-1}|
+    tv_penalty = cp.norm1(mu[1:] - mu[:-1])
+
+    objective = cp.Minimize(data_fit + lam * tv_penalty)
+
+    problem = cp.Problem(objective)
+    problem.solve(verbose=False)
+
+    mu_hat = mu.value  # numpy array
+
+    # ----- 4. Identify regime boundaries from mu_hat -----
+    # A jump occurs if |mu_t - mu_{t-1}| > tol
+    jumps = np.abs(np.diff(mu_hat)) > tol
+
+    # Build regime labels
+    regime = np.zeros(T, dtype=int)
+    current_regime = 0
+    for t in range(1, T):
+        if jumps[t - 1]:
+            current_regime += 1
+        regime[t] = current_regime
+
+    # ----- 5. Build output DataFrame -----
+    result_df = pd.DataFrame(index=log_ret.index)
+    result_df["Regime"] = regime
+
+    # ---- Build ranges list: (regime_id, start_date, end_date) ----
+    ranges = []
+    dates = result_df.index
+    T = len(result_df)
+
+    start_idx = 0
+    for i in range(1, T):
+        if regime[i] != regime[i - 1]:
+            # close the previous segment
+            ranges.append(
+                (int(regime[i - 1]), dates[start_idx], dates[i - 1])
+            )
+            start_idx = i
+
+    # close final regime
+    ranges.append(
+        (int(regime[-1]), dates[start_idx], dates[-1])
+    )
+
+    return result_df, ranges
+
+
+
 # ============================================
 # ZIGZAG SMOOTHING (PRE-CLUSTERING)
 # ============================================
@@ -259,7 +266,7 @@ def log_returns(prices):
 
     return log_rets
 
-def zigzag_tv(series, percent=0.02):
+def zigzag(series, percent=0.02):
     """
     TradingView-style ZigZag with linear interpolation between pivot points.
     percent = reversal threshold (0.02 = 2%)
@@ -342,17 +349,84 @@ def zigzag_tv(series, percent=0.02):
 
     return zigzag
 
+def compute_features(prices, window=60):
+    """
+    prices : DataFrame (T × N)
+        Clean close prices for N assets.
 
-def prepare_SPX_plot(smoothed):
+    Returns
+    -------
+    features : DataFrame (T × 5)
+        Market-level rolling features:
+        1. Market log return (mean across assets)
+        2. Market rolling volatility
+        3. Cross-sectional average volatility across assets
+        4. Cross-sectional dispersion (std across assets)
+        5. Market trend slope (60-day regression slope)
+    """
+
+    # ---------- Basic returns ----------
+    log_prices = np.log(prices)
+    log_returns = log_prices.diff()
+
+    # ---------- 1. Market log return (cross-sectional mean) ----------
+    market_ret = log_returns.mean(axis=1)
+
+    # ---------- 2. Market rolling volatility ----------
+    market_vol = market_ret.rolling(window).std()
+
+    # ---------- 3. Cross-sectional average volatility ----------
+    # Compute each asset's rolling vol, then average across assets
+    indiv_vol = log_returns.rolling(window).std()
+    cross_vol = indiv_vol.mean(axis=1)
+
+    # ---------- 4. Cross-sectional dispersion (std across assets) ----------
+    if prices.shape[1] == 1:
+        cross_disp = pd.Series(0.0, index=log_returns.index)
+    else:
+        cross_disp = log_returns.std(axis=1)
+
+    # ---------- 5. Market trend slope (60d linear regression slope) ----------
+    def rolling_slope(series, window):
+        """Rolling regression slope of price vs time."""
+        slopes = []
+        x = np.arange(window)
+        for i in range(len(series)):
+            if i < window:
+                slopes.append(np.nan)
+                continue
+            y = series.iloc[i-window:i].values
+            # simple linear regression slope (no intercept)
+            slope = np.polyfit(x, y, 1)[0]
+            slopes.append(slope)
+        return pd.Series(slopes, index=series.index)
+
+    market_trend = rolling_slope(log_prices.mean(axis=1), window)
+
+    # ---------- Combine into feature matrix ----------
+    features = pd.DataFrame({
+        "market_ret": market_ret,
+        "market_vol": market_vol,
+        "cross_vol": cross_vol,
+        "cross_disp": cross_disp,
+        "market_trend": market_trend
+    })
+
+    # Clean NaN rows from initial window
+    features = features.iloc[window:]
+
+    return features
+
+def plot(regimes, raw, zigzag):
     plt.figure(figsize=(12, 6))
 
-    plt.plot(SPX.index, SPX["High"], 
+    plt.plot(raw.index, raw["High"], 
          label="SPX Close", 
          alpha=0.4, 
          linewidth=1.5)
 
     # Plot ZigZag smoothed
-    plt.plot(SPX.index, smoothed, 
+    plt.plot(SPX.index, zigzag, 
             label="ZigZag (8%)", 
             linewidth=2.0)
 
@@ -368,43 +442,7 @@ def prepare_SPX_plot(smoothed):
 
     plt.legend()
     plt.tight_layout()
-# ============================================
-# MAIN SCRIPT
-# ============================================
 
-if __name__ == "__main__":
-
-   
-    SPX = pd.read_csv("SPX_raw.csv", index_col="Date", parse_dates=True) 
-    smoothed = zigzag_tv(SPX["High"], percent=ZIG_THRESH)
-
-    zig_ret = smoothed.pct_change().fillna(0)
-
-    prepare_SPX_plot(smoothed)
-
-    
-    
-   
-
-
-
-    # 3. Extract features
-    features = compute_features_new(smoothed.to_frame(), window=WINDOW_SIZE)
-    features = features.replace([np.inf, -np.inf], np.nan)
-    features = features.interpolate(method="linear")
-
-    # 4. Cluster regimes using HMM or KMEANS
-    if ALGORITHM == "Kmeans":
-        regimes, ranges = kmeans_cluster(features, k=K)
-
-    elif ALGORITHM == "HMM":
-        regimes, ranges = hmm_cluster(features, k=K)
-
-    else:
-        sys.exit(0, "incorrect algo selection")
-
-    regimes.to_csv("regime_labels.csv", header=True)
-    
     # ============================================
     # OUTPUT SUMMARY
     # ============================================
@@ -443,3 +481,49 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     plt.show()
+
+# ============================================
+# MAIN SCRIPT
+# ============================================
+
+if __name__ == "__main__":
+
+    # 1. load in data
+    SPX = pd.read_csv("Data/SPX_raw.csv", index_col="Date", parse_dates=True) 
+    
+
+    # 2. compute zig zag
+    zig_zag = zigzag(SPX["High"], percent=ZIG_THRESH)
+    zig_ret = zig_zag.pct_change().fillna(0)
+    # nan_idx = zig_ret.index[zig_ret.iloc[:, 0].isna()]
+    # print(nan_idx)
+    
+    
+    # 3. Extract features
+    features_input = zig_zag.to_frame()
+    #features_input = SPX
+    features = compute_features(features_input, window=WINDOW_SIZE)
+    features = features.replace([np.inf, -np.inf], np.nan)
+    features = features.interpolate(method="linear")
+
+
+    # 4. Cluster regimes using HMM or KMEANS
+    opt_input = features.iloc[:,0].to_frame()
+    opt_input.columns = ["High"]
+    opt_input = SPX
+
+    if ALGORITHM == "Kmeans":
+        regimes, ranges = kmeans_cluster(features, k=K)
+    elif ALGORITHM == "HMM":
+        regimes, ranges = hmm_cluster(features, k=K)
+    elif ALGORITHM == "Optimization":
+        regimes, ranges = convex_regime_segmentation(opt_input, lam=LAM)
+    else:
+        sys.exit(0, "incorrect algo selection")
+
+
+    # 5. Save and plot
+    regimes.to_csv("Data/regime_labels.csv", header=True)
+    plot(regimes, SPX, zig_zag)
+
+    

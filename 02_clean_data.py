@@ -63,7 +63,7 @@ def kalman_denoise_multifeature(
 
 
 try:
-    df = pd.read_csv("sp500_20yr_raw.csv")
+    df = pd.read_csv("Data/sp500_20yr_raw.csv")
 except:
     print("sp500_20yr_close.csv has not yet been created! Run 01_gather_data.py")
 
@@ -85,7 +85,7 @@ print(df.head())
 
 print(df.shape)
 df = pd.DataFrame(df) #convert back to dataframe
-df.to_csv("sp500_20yr_clean.csv")
+df.to_csv("Data/sp500_20yr_clean.csv")
 
 
 
