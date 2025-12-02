@@ -14,7 +14,7 @@ import matplotlib.dates as mdates
 # PARAMETERS
 # ============================================
 
-ALGORITHM = "Kmeans" # "Kmeans" or "HMM" or "Optimization"
+ALGORITHM = "Optimization" # "Kmeans" or "HMM" or "Optimization"
 ZIG_THRESH = 0.08
 WINDOW_SIZE = 30        # rolling window for features
 K = 5                 # number of regimes
