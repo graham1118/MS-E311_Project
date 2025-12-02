@@ -4,58 +4,93 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from hmmlearn.hmm import GaussianHMM
 from matplotlib import pyplot as plt
+from sklearn.decomposition import PCA
 import sys
+import pandas_ta as ta
+import matplotlib.dates as mdates
 
 # ============================================
 # PARAMETERS
 # ============================================
 
-WINDOW_SIZE = 60        # rolling window for features
-K = 5                   # number of regimes
-MIN_LEN = 50            # minimum allowed contiguous regime length
+ALGORITHM = "Kmeans" #"HMM" or "Kmeans"
+ZIG_THRESH = 0.08
+WINDOW_SIZE = 120        # rolling window for features
+K = 5                 # number of regimes
+MIN_LEN = 25            # minimum allowed contiguous regime length
 
 
 # ============================================
 # FEATURE ENGINEERING
 # ============================================
 
-def compute_features(prices, window):
+def compute_features_new(prices, window=60):
     """
     prices : DataFrame (T × N)
-        Clean close prices, no NaNs.
-    window : int
-        Rolling window size.
+        Clean close prices for N assets.
 
     Returns
     -------
-    features_concat : DataFrame (T - window × (5*N))
-        Clean rolling features. Timestamps preserved.
-        Column names are like 'AAPL:mean', 'MSFT:vol', etc.
+    features : DataFrame (T × 5)
+        Market-level rolling features:
+        1. Market log return (mean across assets)
+        2. Market rolling volatility
+        3. Cross-sectional average volatility across assets
+        4. Cross-sectional dispersion (std across assets)
+        5. Market trend slope (60-day regression slope)
     """
 
-    returns = prices.pct_change()
-    features = []
+    # ---------- Basic returns ----------
+    log_prices = np.log(prices)
+    log_returns = log_prices.diff()
 
-    for ticker in prices.columns:
-        r = returns[ticker]
+    # ---------- 1. Market log return (cross-sectional mean) ----------
+    market_ret = log_returns.mean(axis=1)
 
-        df_feat = pd.DataFrame({
-            f"{ticker}:mean": r.rolling(window).mean(),
-            f"{ticker}:vol":  r.rolling(window).std(),
-            f"{ticker}:skew": r.rolling(window).skew(),
-            f"{ticker}:kurt": r.rolling(window).kurt(),
-            f"{ticker}:mom":  prices[ticker].pct_change(window)
-        })
+    # ---------- 2. Market rolling volatility ----------
+    market_vol = market_ret.rolling(window).std()
 
-        features.append(df_feat)
+    # ---------- 3. Cross-sectional average volatility ----------
+    # Compute each asset's rolling vol, then average across assets
+    indiv_vol = log_returns.rolling(window).std()
+    cross_vol = indiv_vol.mean(axis=1)
 
-    features_concat = pd.concat(features, axis=1)
+    # ---------- 4. Cross-sectional dispersion (std across assets) ----------
+    if prices.shape[1] == 1:
+        cross_disp = pd.Series(0.0, index=log_returns.index)
+    else:
+        cross_disp = log_returns.std(axis=1)
 
-    # Drop first  `window` rows (all NaNs)
-    features_concat = features_concat.iloc[window:]
+    # ---------- 5. Market trend slope (60d linear regression slope) ----------
+    def rolling_slope(series, window):
+        """Rolling regression slope of price vs time."""
+        slopes = []
+        x = np.arange(window)
+        for i in range(len(series)):
+            if i < window:
+                slopes.append(np.nan)
+                continue
+            y = series.iloc[i-window:i].values
+            # simple linear regression slope (no intercept)
+            slope = np.polyfit(x, y, 1)[0]
+            slopes.append(slope)
+        return pd.Series(slopes, index=series.index)
 
-    return features_concat
+    market_trend = rolling_slope(log_prices.mean(axis=1), window)
 
+    # ---------- Combine into feature matrix ----------
+    features = pd.DataFrame({
+        "market_ret": market_ret,
+        "market_vol": market_vol,
+        "cross_vol": cross_vol,
+        "cross_disp": cross_disp,
+        "market_trend": market_trend
+    })
+
+    # Clean NaN rows from initial window
+    features = features.iloc[window:]
+
+    return features
 
 
 # ============================================
@@ -77,9 +112,13 @@ def hmm_cluster(features_concat, k=K):
         Contiguous regime ranges.
     """
 
-    # 1. Standardize features (as HMM behaves better normalized)
+    if isinstance(features_concat, pd.Series):
+        features_concat = features_concat.to_frame()
+
+    # 1. Standardize features
     scaler = StandardScaler()
-    X = scaler.fit_transform(features_concat)
+    #X = scaler.fit_transform(features_concat)
+    X = scaler.fit_transform(features_concat.values.reshape(-1, features_concat.shape[1])) #for only 1 column
 
     # 2. Fit Gaussian HMM
     hmm = GaussianHMM(
@@ -88,6 +127,10 @@ def hmm_cluster(features_concat, k=K):
         n_iter=200,
         random_state=42
     )
+
+    #1.5 do PCA
+    # pca = PCA(n_components=2)
+    # X_pca = pca.fit_transform(X)
 
     hmm.fit(X)
     labels = hmm.predict(X)
@@ -128,9 +171,21 @@ def kmeans_cluster(features_concat, k, min_len=100):
         Final contiguous ranges after smoothing.
     """
 
-    # 1. Standardize features
+   # Always convert to DataFrame (works for Series or DataFrame)
+    features_df = pd.DataFrame(features_concat)
+
+    # Standardize (scaler keeps 1 or many columns correctly)
     scaler = StandardScaler()
-    X = scaler.fit_transform(features_concat)
+    X = scaler.fit_transform(features_df.values)
+
+    # #1.5 do PCA
+    # pca = PCA(n_components=2)
+    # X_pca = pca.fit_transform(X)
+
+
+    # plt.figure()
+    # plt.plot(range(X.shape[0]), X)
+    # plt.show()
 
     # 2. K-means clustering
     km = KMeans(n_clusters=k, random_state=42)
@@ -183,6 +238,10 @@ def kmeans_cluster(features_concat, k, min_len=100):
 
     return regimes_smoothed, ranges
 
+# ============================================
+# ZIGZAG SMOOTHING (PRE-CLUSTERING)
+# ============================================
+
 def log_returns(prices):
     '''
     prices: a T x N datafram with index as dates and columns as tickers
@@ -200,35 +259,152 @@ def log_returns(prices):
 
     return log_rets
 
+def zigzag_tv(series, percent=0.02):
+    """
+    TradingView-style ZigZag with linear interpolation between pivot points.
+    percent = reversal threshold (0.02 = 2%)
+    """
+    s = series.values
+    idx = series.index
+    n = len(s)
 
+    if n < 3:
+        return series.copy()
+
+    pivots = np.full(n, np.nan)
+    last_pivot = 0
+    last_pivot_price = s[0]
+    direction = 0  # +1 uptrend, -1 downtrend
+
+    for i in range(1, n):
+        change = (s[i] - last_pivot_price) / last_pivot_price
+
+        if direction == 0:
+            if change > percent:
+                direction = +1
+                last_pivot = i
+                last_pivot_price = s[i]
+                pivots[i] = s[i]
+            elif change < -percent:
+                direction = -1
+                last_pivot = i
+                last_pivot_price = s[i]
+                pivots[i] = s[i]
+
+        elif direction == +1:
+            if s[i] > last_pivot_price:   # new high continues trend
+                last_pivot = i
+                last_pivot_price = s[i]
+            elif change < -percent:       # down reversal
+                direction = -1
+                last_pivot = i
+                last_pivot_price = s[i]
+                pivots[i] = s[i]
+
+        elif direction == -1:
+            if s[i] < last_pivot_price:   # new low continues trend
+                last_pivot = i
+                last_pivot_price = s[i]
+            elif change > percent:        # up reversal
+                direction = +1
+                last_pivot = i
+                last_pivot_price = s[i]
+                pivots[i] = s[i]
+
+    # ---- NOW PERFORM LINEAR INTERPOLATION BETWEEN PIVOTS ----
+    zigzag = pd.Series(np.nan, index=idx)
+
+    # get pivot indices
+    pivot_idx = np.where(~np.isnan(pivots))[0]
+
+    if len(pivot_idx) < 2:
+        # not enough pivots -> no zigzag possible
+        return series.copy()
+
+    for j in range(len(pivot_idx) - 1):
+        a = pivot_idx[j]
+        b = pivot_idx[j + 1]
+
+        y0 = pivots[a]
+        y1 = pivots[b]
+
+        # linear interpolation from pivot a to pivot b
+        steps = b - a
+        if steps <= 0:
+            continue
+
+        line = np.linspace(y0, y1, steps + 1)
+        zigzag.iloc[a:b+1] = line
+
+    # Fill start/end if needed
+    zigzag.iloc[:pivot_idx[0]] = pivots[pivot_idx[0]]
+    zigzag.iloc[pivot_idx[-1]:] = pivots[pivot_idx[-1]]
+
+    return zigzag
+
+
+def prepare_SPX_plot(smoothed):
+    plt.figure(figsize=(12, 6))
+
+    plt.plot(SPX.index, SPX["High"], 
+         label="SPX Close", 
+         alpha=0.4, 
+         linewidth=1.5)
+
+    # Plot ZigZag smoothed
+    plt.plot(SPX.index, smoothed, 
+            label="ZigZag (8%)", 
+            linewidth=2.0)
+
+    # Title and labels
+    plt.title("SPX Close vs. ZigZag Smoothed Series (1% Threshold)")
+    plt.xlabel("Date")
+    plt.ylabel("Price Level")
+
+    # Format x-axis ticks (rotate + nice date formatting)
+    plt.gca().xaxis.set_major_locator(mdates.YearLocator(base=2))      # tick every 2 years
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+    plt.xticks(rotation=45)
+
+    plt.legend()
+    plt.tight_layout()
 # ============================================
 # MAIN SCRIPT
 # ============================================
 
 if __name__ == "__main__":
 
-    # 1. Load data
-    prices = pd.read_csv("sp500_20yr_clean.csv")
+   
+    SPX = pd.read_csv("SPX_raw.csv", index_col="Date", parse_dates=True) 
+    smoothed = zigzag_tv(SPX["High"], percent=ZIG_THRESH)
 
-    dates = prices["Timestamp"]
-    prices = prices.iloc[:, 2:]    # drop index + timestamp
+    zig_ret = smoothed.pct_change().fillna(0)
 
-    # Ensure date index on prices
-    prices.index = dates
-    print(prices.head())
+    prepare_SPX_plot(smoothed)
 
-    # 2. Compute log returns
-    features_log_ret = log_returns(prices)
     
+    
+   
+
+
+
     # 3. Extract features
-    features_concat = compute_features(prices, window=WINDOW_SIZE)
+    features = compute_features_new(smoothed.to_frame(), window=WINDOW_SIZE)
+    features = features.replace([np.inf, -np.inf], np.nan)
+    features = features.interpolate(method="linear")
 
     # 4. Cluster regimes using HMM or KMEANS
-    regimes, ranges = kmeans_cluster(features_concat, k=K)
-    #regimes, ranges = hmm_cluster(features_concat, k=K)
+    if ALGORITHM == "Kmeans":
+        regimes, ranges = kmeans_cluster(features, k=K)
+
+    elif ALGORITHM == "HMM":
+        regimes, ranges = hmm_cluster(features, k=K)
+
+    else:
+        sys.exit(0, "incorrect algo selection")
+
+    regimes.to_csv("regime_labels.csv", header=True)
     
-
-
     # ============================================
     # OUTPUT SUMMARY
     # ============================================
@@ -238,35 +414,19 @@ if __name__ == "__main__":
        count = regimes.loc[start:end].shape[0]
        print(f"Regime {regime_id}: {start} → {end}  ({count} points)")
 
-    # Optionally save regimes
-    # regimes.to_csv("regimes_output.csv")
-    # print("\nSaved regime labels to regimes_output.csv")
-
-
 
     # ===========================
     # Regime Plot with Random Tickers + Vertical Regime Boundaries
     # ===========================
 
-    M = 5   # number of tickers to sample randomly
+    # M = 5   # number of tickers to sample randomly
 
-    # Extract usable data
-    all_tickers = prices.columns.to_list()
-    sampled_tickers = np.random.choice(all_tickers, size=M, replace=False)
+    # # Extract usable data
+    # all_tickers = prices.columns.to_list()
+    # sampled_tickers = np.random.choice(all_tickers, size=M, replace=False)
 
-    timestamps = features_concat.index   # aligns with regimes
-    price_subset = prices.loc[timestamps, sampled_tickers]
-
-    plt.figure(figsize=(10, 6))
-
-    # ----- Plot sampled asset prices -----
-    for t in sampled_tickers:
-        plt.plot(timestamps, price_subset[t], label=t, linewidth=1.0)
-
-    plt.title(f"Sampled Asset Prices with Regime Boundaries (M={M})")
-    plt.xlabel("Date")
-    plt.ylabel("Price")
-    plt.legend(loc="upper left")
+    # timestamps = prices.index   # aligns with regimes
+    # price_subset = prices.loc[timestamps, sampled_tickers]
 
 
     # ----- Plot vertical boundary lines -----
@@ -275,9 +435,11 @@ if __name__ == "__main__":
         if start != ranges[0][1]:
             plt.axvline(x=start, color="red", linewidth=1.4, alpha=0.6)
 
-    # ----- Optional: Color background by regime (uncomment if desired) -----
-    # for (regime_id, start, end) in ranges:
-    #     plt.axvspan(start, end, alpha=0.05 * (regime_id + 1), color="gray")
-
+    #ADD SHADING
+    for (regime_id, start, end) in ranges:
+        plt.axvspan(start, end,
+                alpha=0.15,
+                color=plt.cm.tab10(regime_id % 10))
+    
     plt.tight_layout()
     plt.show()

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
 
-SMOOTH_FACTOR = 75
+SMOOTH_FACTOR = 100
 
 def kalman_denoise_multifeature(
     X,
@@ -69,8 +69,8 @@ except:
 
 
 
-## Fills in single missing NaNs
-df = df.ffill()
+## Fills in single missing NaNs using linear interpolation
+df = df.interpolate(method="linear")
 
 # 1. Identify columns whose first value is NaN
 bad_cols = df.columns[df.iloc[0].isna()]

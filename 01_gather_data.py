@@ -2,12 +2,35 @@ import datetime as dt
 import pandas as pd
 import yfinance as yf
 import time
+import sys
 
 MIN_YEARS_HISTORY = 20
 SAVE_PATH = f"sp500_{MIN_YEARS_HISTORY}yr_raw.csv"
 
 end_date = dt.date.today()
 start_date = end_date - dt.timedelta(days=MIN_YEARS_HISTORY * 365)
+
+
+########### SPX ONLY ###############
+ticker = "^SPX"
+raw_df = yf.download(
+        ticker,
+        start=start_date,
+        end=end_date,
+        interval="1d",
+    )
+
+
+
+
+clean_df = raw_df.xs('^SPX', level=1, axis=1)[['High', 'Low']]
+
+print(clean_df.head())
+
+clean_df.to_csv("SPX_raw.csv", index=True)
+
+sys.exit(0)
+####################################
 
 tickers = pd.read_csv("sp500_tickers.csv")["Symbol"].tolist()
 
