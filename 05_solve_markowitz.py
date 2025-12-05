@@ -1,5 +1,7 @@
 import cvxpy as cp
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
 LAM = 1 # higher = more penalty on variance, risk averse, 
         # lower = more risk-tolerant
@@ -64,6 +66,10 @@ sigma_all_regimes = npzfile['sigma_all_regimes']
 K = mu_all_regimes.shape[0] #number of regimes
 N = mu_all_regimes.shape[1] #number of assets (columns)
 
+npz_whole_dataset = np.load("Data/mu_sigma_whole_dataset.npz")
+mu_whole = npz_whole_dataset['mu']
+sigma_whole = npz_whole_dataset['sigma']
+
 weights_all_regimes = np.zeros((K, N))
 
 for k in range(mu_all_regimes.shape[0]):
@@ -76,7 +82,6 @@ for k in range(mu_all_regimes.shape[0]):
 # ------------------------------------------------------------
 # Efficient Frontier Plot (Option A: Fix return, minimize variance)
 # ------------------------------------------------------------
-import matplotlib.pyplot as plt
 
 def solve_min_variance_for_return(mu, Sigma, target_return, long_only=True):
     """
@@ -108,9 +113,10 @@ def solve_min_variance_for_return(mu, Sigma, target_return, long_only=True):
 
 
 # Pick a regime to plot (e.g., the first one)
-mu = mu_all_regimes[0]
-Sigma = sigma_all_regimes[0]
-Sigma = (1 - delta) * Sigma + delta * np.diag(np.diag(Sigma))
+#mu = mu_all_regimes[5]
+#Sigma = sigma_all_regimes[5]
+mu = mu_whole
+Sigma = sigma_whole
 
 # Sweep returns from minimum to maximum achievable
 target_returns = np.linspace(mu.min(), mu.max(), 40)
@@ -133,3 +139,75 @@ plt.title("Efficient Frontier (Regime 0)")
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+
+# ------------------------------------------------------------
+# Backtesting: Apply optimal weights to test set
+# ------------------------------------------------------------
+
+# Read the training data to get column names (stock tickers)
+sp500_train = pd.read_csv("Data/sp500_20yr_clean.csv", index_col="Timestamp", parse_dates=True)
+stock_tickers = sp500_train.columns.tolist()
+
+# Read test set
+test_set = pd.read_csv("Data/test_set.csv", index_col="Timestamp", parse_dates=True)
+# Drop 'Unnamed: 0' column if it exists
+if 'Unnamed: 0' in test_set.columns:
+    test_set = test_set.drop(columns=['Unnamed: 0'])
+
+# Align test_set columns with training data columns
+# Keep only stocks that are in both datasets
+common_stocks = [ticker for ticker in stock_tickers if ticker in test_set.columns]
+test_set_aligned = test_set[common_stocks]
+
+# Get indices of common stocks in the original training data
+stock_indices = [stock_tickers.index(ticker) for ticker in common_stocks]
+
+# Subset mu and Sigma to only include common stocks
+mu_aligned = mu[stock_indices]
+Sigma_aligned = Sigma[np.ix_(stock_indices, stock_indices)]
+
+# Choose desired return and solve for optimal weights
+target_return = 0.0002  # Adjust this to your desired daily return
+w_backtest = solve_min_variance_for_return(mu_aligned, Sigma_aligned, target_return)
+
+# Get first and last day prices
+first_day_prices = test_set_aligned.iloc[0, :].values  # First row (day 1)
+last_day_prices = test_set_aligned.iloc[-1, :].values  # Last row (day 30)
+
+# Calculate portfolio value change
+# Assume we start with $1 invested according to weights w_backtest
+# Number of shares bought on day 1: w_backtest[i] / first_day_prices[i]
+# Value on day 30: sum(shares[i] * last_day_prices[i])
+
+# Initial portfolio value (normalized to 1)
+initial_value = 1.0
+
+# Shares of each stock purchased with initial allocation
+shares = w_backtest * initial_value / first_day_prices
+
+# Final portfolio value
+final_value = np.sum(shares * last_day_prices)
+
+# Calculate actual return
+actual_return = (final_value - initial_value) / initial_value
+
+print("\n" + "="*60)
+print("BACKTESTING RESULTS")
+print("="*60)
+print(f"Target daily return: {target_return:.6f}")
+print(f"Test period: {test_set.index[0]} to {test_set.index[-1]}")
+print(f"Number of days: {len(test_set)}")
+print(f"Initial portfolio value: ${initial_value:.2f}")
+print(f"Final portfolio value: ${final_value:.2f}")
+print(f"Actual return over test period: {actual_return:.4%}")
+print(f"Annualized return (assuming 252 trading days): {(1 + actual_return)**(252/len(test_set)) - 1:.4%}")
+print("="*60)
+
+# Print top 10 holdings
+top_holdings_idx = np.argsort(w_backtest)[-10:][::-1]
+print("\nTop 10 Holdings:")
+for i, idx in enumerate(top_holdings_idx, 1):
+    print(f"{i}. {common_stocks[idx]}: {w_backtest[idx]:.4%}")
+print("="*60)
+print(f"\nNote: Portfolio constructed using {len(common_stocks)} stocks present in both training and test sets.")

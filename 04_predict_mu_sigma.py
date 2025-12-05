@@ -56,6 +56,9 @@ def ew_mu_sigma(returns, regimes, k, alpha=0.97, shrink_cov=0.2):
 ##### Read in Data #####
 sp500 = pd.read_csv("Data/sp500_20yr_clean.csv", index_col="Timestamp", parse_dates=True)
 
+
+
+
 sp500_logrets = log_returns(sp500).dropna()
 sp500_logrets.replace([np.inf, -np.inf], 0, inplace=True)
 #print(sp500_logrets.head(), sp500_logrets.shape)
@@ -63,6 +66,10 @@ sp500_logrets.replace([np.inf, -np.inf], 0, inplace=True)
 ##### Read in Regimes #######
 regimes = pd.read_csv("Data/regime_labels.csv", index_col="Date", parse_dates=True)
 regimes = regimes.iloc[1:]
+
+# Align regimes with sp500_logrets by index (dates)
+# Keep only the regimes that match the dates in sp500_logrets
+regimes = regimes.loc[sp500_logrets.index]
 #print(regimes.head(), regimes.shape)
 
 
@@ -81,3 +88,11 @@ for k in unique_regimes:
     sigma_all_regimes[k, :, :] = sigma
 
 np.savez("Data/mu_sigma", mu_all_regimes=mu_all_regimes, sigma_all_regimes=sigma_all_regimes)
+
+
+# Calculate mu and sigma for the entire dataset (no regime separation)
+# Create a dummy regime array where all observations are in regime 0
+dummy_regimes = np.zeros(len(sp500_logrets))
+mu_whole, sigma_whole = ew_mu_sigma(sp500_logrets.to_numpy(), dummy_regimes, 0)
+
+np.savez("Data/mu_sigma_whole_dataset", mu=mu_whole, sigma=sigma_whole)
