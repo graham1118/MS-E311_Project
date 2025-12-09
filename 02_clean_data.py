@@ -61,9 +61,26 @@ def kalman_denoise_multifeature(
 
     return out
 
+def log_returns(prices):
+    '''
+    prices: a T x N datafram with index as dates and columns as tickers
+    '''
+    # Ensure we operate on a pandas DataFrame so we can use shift()
+    if not isinstance(prices, pd.DataFrame):
+        prices = pd.DataFrame(prices)
+
+    # Coerce columns to numeric where possible (non-numeric -> NaN)
+    prices = prices.apply(pd.to_numeric, errors='coerce')
+
+    # Log returns: log(p_t) - log(p_{t-1}) == np.log(prices).diff()
+    # This preserves the DataFrame index and columns and returns floats.
+    log_rets = np.log(prices).diff()
+
+    return log_rets
+
 
 try:
-    df = pd.read_csv("Data/sp500_20yr_raw.csv")
+    df = pd.read_csv("Data/sp500_20yr_raw.csv", index_col="Timestamp", parse_dates=True)
 except:
     print("sp500_20yr_close.csv has not yet been created! Run 01_gather_data.py")
 
@@ -76,16 +93,19 @@ df = df.interpolate(method="linear")
 bad_cols = df.columns[df.iloc[0].isna()]
 print("Columns with NaN in first row:", len(bad_cols))
 df = df.drop(columns=bad_cols)
-
-
-
 orig_df = df.copy(deep=True)
-df.iloc[:,1:] = kalman_denoise_multifeature(df.iloc[:,1:])
-print(df.head())
 
-print(df.shape)
-df = pd.DataFrame(df) #convert back to dataframe
-df.to_csv("Data/sp500_20yr_clean.csv")
+#Denoised
+
+df.iloc[:,1:] = kalman_denoise_multifeature(df.iloc[:,1:])
+denoised = df
+#Take Log rz
+denoised_logrets = log_returns(denoised).dropna()
+denoised_logrets.replace([np.inf, -np.inf], 0, inplace=True)
+print(denoised_logrets.shape)
+
+denoised_logrets = pd.DataFrame(denoised_logrets) #convert back to dataframe
+denoised_logrets.to_csv("Data/train_set.csv")
 
 
 
@@ -103,7 +123,7 @@ fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10,6))
 ax1.plot(range(PLOT_LENGTH), orig_df.iloc[start:end, rand_ticker]) 
 ax1.set_title(f"Raw prices for {columns[rand_ticker]} starting {df.iloc[start, 0]}")
 
-ax2.plot(range(PLOT_LENGTH), df.iloc[start:end, rand_ticker]) 
-ax2.set_title(f"Denoised prices for {columns[rand_ticker]} starting {df.iloc[start, 0]}")
+ax2.plot(range(PLOT_LENGTH), denoised.iloc[start:end, rand_ticker]) 
+ax2.set_title(f"Denoised prices for {columns[rand_ticker]} starting {denoised.iloc[start, 0]}")
 plt.show()
 

@@ -1,22 +1,6 @@
 import numpy as np
 import pandas as pd
 
-def log_returns(prices):
-    '''
-    prices: a T x N datafram with index as dates and columns as tickers
-    '''
-    # Ensure we operate on a pandas DataFrame so we can use shift()
-    if not isinstance(prices, pd.DataFrame):
-        prices = pd.DataFrame(prices)
-
-    # Coerce columns to numeric where possible (non-numeric -> NaN)
-    prices = prices.apply(pd.to_numeric, errors='coerce')
-
-    # Log returns: log(p_t) - log(p_{t-1}) == np.log(prices).diff()
-    # This preserves the DataFrame index and columns and returns floats.
-    log_rets = np.log(prices).diff()
-
-    return log_rets
 
 def ew_mu_sigma(returns, regimes, k, alpha=0.97, shrink_cov=0.2):
     """
@@ -54,45 +38,48 @@ def ew_mu_sigma(returns, regimes, k, alpha=0.97, shrink_cov=0.2):
 
 
 ##### Read in Data #####
-sp500 = pd.read_csv("Data/sp500_20yr_clean.csv", index_col="Timestamp", parse_dates=True)
+sp500 = pd.read_csv("Data/train_set.csv", index_col="Timestamp", parse_dates=True)
 
 
-
-
-sp500_logrets = log_returns(sp500).dropna()
-sp500_logrets.replace([np.inf, -np.inf], 0, inplace=True)
-#print(sp500_logrets.head(), sp500_logrets.shape)
 
 ##### Read in Regimes #######
 regimes = pd.read_csv("Data/regime_labels.csv", index_col="Date", parse_dates=True)
-regimes = regimes.iloc[1:]
+print(f"Regimes initial shape: {regimes.shape}")
 
-# Align regimes with sp500_logrets by index (dates)
-# Keep only the regimes that match the dates in sp500_logrets
-regimes = regimes.loc[sp500_logrets.index]
-#print(regimes.head(), regimes.shape)
+# Drop first row to align with log returns (which lose the first row from .diff())
+regimes = regimes.iloc[1:]
+print(f"Regimes after dropping first row: {regimes.shape}")
+
+# Use position-based alignment: take only the first len(sp500) rows
+regimes = regimes.iloc[:len(sp500)]
+print(f"Regimes after position-based alignment: {regimes.shape}")
+print(f"SP500 shape: {sp500.shape}")
+
 
 
 unique_regimes = regimes["Regime"].unique()
+print(regimes.shape)
+print(f"Unique regimes: {unique_regimes}")
 K = len(unique_regimes)
 N = len(sp500.columns)
 
 
-#regime number is 1st index
+
+#regime number is 1st index - use enumerate to avoid index errors
 mu_all_regimes = np.zeros((K, N))
 sigma_all_regimes = np.zeros((K, N, N))
 
-for k in unique_regimes:
-    mu, sigma = ew_mu_sigma(sp500_logrets.to_numpy(), regimes["Regime"], k)
-    mu_all_regimes[k, :] = mu
-    sigma_all_regimes[k, :, :] = sigma
+for i, k in enumerate(unique_regimes):
+    mu, sigma = ew_mu_sigma(sp500.to_numpy(), regimes["Regime"].to_numpy(), k)
+    mu_all_regimes[i, :] = mu
+    sigma_all_regimes[i, :, :] = sigma
 
-np.savez("Data/mu_sigma", mu_all_regimes=mu_all_regimes, sigma_all_regimes=sigma_all_regimes)
+np.savez("Data/mu_sigma_regimes", mu_all_regimes=mu_all_regimes, sigma_all_regimes=sigma_all_regimes)
 
 
 # Calculate mu and sigma for the entire dataset (no regime separation)
 # Create a dummy regime array where all observations are in regime 0
-dummy_regimes = np.zeros(len(sp500_logrets))
-mu_whole, sigma_whole = ew_mu_sigma(sp500_logrets.to_numpy(), dummy_regimes, 0)
+dummy_regimes = np.zeros(len(sp500))
+mu_whole, sigma_whole = ew_mu_sigma(sp500.to_numpy(), dummy_regimes, 0)
 
 np.savez("Data/mu_sigma_whole_dataset", mu=mu_whole, sigma=sigma_whole)

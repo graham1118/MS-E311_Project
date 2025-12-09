@@ -227,7 +227,7 @@ def solve_global_min_variance(mu, Sigma, long_only=True,
 # Load regime-specific μ, Σ
 # -----------------------------
 
-npzfile = np.load("Data/mu_sigma.npz")
+npzfile = np.load("Data/mu_sigma_regimes.npz")
 mu_all_regimes = npzfile["mu_all_regimes"]
 sigma_all_regimes = npzfile["sigma_all_regimes"]
 
@@ -293,7 +293,7 @@ plt.show()
 # If you prefer absolute path:
 # sp500_train = pd.read_csv("/Users/ohmpatel/Desktop/MSE311/MS-E311_Project/Data/sp500_20yr_clean.csv",
 #                           index_col="Timestamp", parse_dates=True)
-sp500_train = pd.read_csv("Data/sp500_20yr_clean.csv",
+sp500_train = pd.read_csv("Data/train_set.csv",
                           index_col="Timestamp", parse_dates=True)
 stock_tickers = sp500_train.columns.tolist()
 

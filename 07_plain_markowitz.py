@@ -60,7 +60,7 @@ def solve_markowitz(mu, Sigma, lambda_risk, gamma_reg, long_only=True):
 
 
 
-npzfile = np.load("Data/mu_sigma.npz")
+npzfile = np.load("Data/mu_sigma_regimes.npz")
 mu_all_regimes = npzfile['mu_all_regimes']
 sigma_all_regimes = npzfile['sigma_all_regimes']
 K = mu_all_regimes.shape[0] #number of regimes
